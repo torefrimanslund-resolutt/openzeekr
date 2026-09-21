@@ -66,6 +66,36 @@ class AuthRepository(private val store: ConfigStore, private val client: ApiClie
 
 class RemoteControlRepository(private val store: ConfigStore, private val client: ApiClient) {
 
+    /** Three existing GETs only: no heartbeat, wake-up, command, or service-ID probing. */
+    suspend fun labsSnapshot(): CallResult<LabsSnapshot> = withContext(Dispatchers.IO) {
+        val cfg = store.current()
+        if (cfg.vin.isBlank()) return@withContext CallResult.Err("Configure a vehicle before capturing.")
+        val api = client.labsApi
+        val secrets = listOf(cfg.vin, cfg.userId, cfg.accountUuid, cfg.deviceIdentifier,
+            cfg.appInstanceId, cfg.accessToken, cfg.azureToken, cfg.email, cfg.proximityDeviceMac)
+        suspend fun capture(read: suspend () -> kotlinx.serialization.json.JsonElement?): LabsSource = try {
+            val raw = read()
+            if (raw == null || raw == kotlinx.serialization.json.JsonNull)
+                LabsSource(error = "No data returned")
+            else LabsSource(raw = LabsJson.sanitize(raw, secrets))
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Exception/server messages can contain URLs, identifiers or response bodies.
+            LabsSource(error = "Read failed; check connection and sign-in, then retry")
+        }
+        val sources = linkedMapOf(
+            "capability" to capture { api.vehicleCapability().data },
+            "remoteControlState" to capture { api.remoteControlState().data },
+            "vehicleStatus" to capture { api.vehicleStatus().data },
+        )
+        val current = store.current()
+        if (current.vin != cfg.vin || current.userId != cfg.userId || current.baseUrl != cfg.baseUrl ||
+            current.accessToken != cfg.accessToken)
+            CallResult.Err("Vehicle or session changed; capture again.")
+        else CallResult.Ok(LabsSnapshot(System.currentTimeMillis(), sources))
+    }
+
     /** Last status key-structure we logged; used to dump the schema only when it changes (not per poll). */
     private var lastStatusKeyTree: String? = null
 
