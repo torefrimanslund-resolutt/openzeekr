@@ -64,6 +64,11 @@ import kotlinx.coroutines.launch
 @Composable
 fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
+    val labsConfig by deps.config.config.collectAsState()
+    val labsState = remember(labsConfig.vin, labsConfig.userId, labsConfig.baseUrl, labsConfig.accessToken) { LabsPanelState() }
+    androidx.compose.runtime.DisposableEffect(labsState) {
+        onDispose { labsState.clear() }
+    }
     val bleState by deps.ble.state.collectAsState()
     val bleReady = bleState == DkBleManager.State.SESSION_READY
 
@@ -116,6 +121,8 @@ fun ControlsScreen(deps: Deps, snackbar: (String) -> Unit, modifier: Modifier = 
         }
 
         item { VehicleStatusCard(deps) }
+
+        item { SevenXLabsPanel(deps, labsState, scope) }
 
         item { ProximityCard(deps) }
 

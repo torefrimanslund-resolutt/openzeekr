@@ -26,13 +26,17 @@ class ApiClient private constructor(private val store: ConfigStore) {
     @Volatile var api: TspApi = retrofit.create(TspApi::class.java)
         private set
 
-    private fun build(): Retrofit {
+    // Separate client: Labs raw payloads must never enter the optional BODY logger.
+    @Volatile internal var labsApi: TspApi = build(logBodies = false).create(TspApi::class.java)
+        private set
+
+    private fun build(logBodies: Boolean = true): Retrofit {
         // Route OkHttp logging into the on-device log (Logx) at BODY level so cloud
         // request/response bodies are visible on-device while debugging. The level is
         // flipped to NONE when debug logging is off, so with the toggle off OkHttp never
         // even formats request/response bodies (no tokens built into strings, nothing to leak).
         val logging = HttpLoggingInterceptor { m -> com.openzeekr.app.util.Logx.d("http", m) }
-        val ok = OkHttpClient.Builder()
+        val builder = OkHttpClient.Builder()
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             // Watches every response for the 079021 "logged in elsewhere" kick-out.
@@ -42,6 +46,7 @@ class ApiClient private constructor(private val store: ConfigStore) {
             // Signs the overseas-app inbox host with its own HMAC AK/SK (the two above
             // passthrough for that host); no-op for every other request.
             .addInterceptor(OverseasAppAuthInterceptor(store))
+        if (logBodies) builder
             // Gate the logging level per-request (interceptor runs just before `logging`,
             // which reads its level at the start of its own intercept()).
             .addInterceptor { chain ->
@@ -50,7 +55,7 @@ class ApiClient private constructor(private val store: ConfigStore) {
                 chain.proceed(chain.request())
             }
             .addInterceptor(logging)
-            .build()
+        val ok = builder.build()
 
         val base = store.current().baseUrl.trimEnd('/') + "/"
         return Retrofit.Builder()
@@ -64,6 +69,7 @@ class ApiClient private constructor(private val store: ConfigStore) {
     fun rebuild() {
         retrofit = build()
         api = retrofit.create(TspApi::class.java)
+        labsApi = build(logBodies = false).create(TspApi::class.java)
     }
 
     companion object {
