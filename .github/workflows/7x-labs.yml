@@ -20,4 +20,9 @@ jobs:
       - run: sdkmanager 'platforms;android-34' 'build-tools;34.0.0'
       - run: chmod +x gradlew
       - run: ./gradlew :core:testDebugUnitTest :app:assembleDebug :wear:assembleDebug --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openzeekr-7x-labs-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
 
