@@ -83,4 +83,6 @@ dependencies {
 
     // Offline crypto unit tests (RPA CMAC / ECIES key unwrap)
     testImplementation("junit:junit:4.13.2")
+    // Exercise Android Base64.DEFAULT, including folding and the final LF.
+    testImplementation("org.robolectric:robolectric:4.13")
 }

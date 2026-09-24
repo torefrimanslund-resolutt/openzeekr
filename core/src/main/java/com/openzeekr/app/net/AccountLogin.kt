@@ -45,33 +45,18 @@ class AccountLogin(private val store: ConfigStore) {
     /** user-center session token (from loginByEmailEncrypt), added to later UC calls. */
     @Volatile private var ucToken: String = ""
 
-    // Pipe OkHttp's HEADERS-level log into our on-device ring buffer too. Level is flipped to
-    // NONE when debug logging is off (via httpLogGate below), so nothing is formatted/logged then.
-    private val httpLog = okhttp3.logging.HttpLoggingInterceptor { m -> Logx.d("http", m) }
-    // Runs just before httpLog and sets its level from the debug-logging toggle.
-    private val httpLogGate = okhttp3.Interceptor { chain ->
-        httpLog.level = if (Logx.isHttpEnabled) okhttp3.logging.HttpLoggingInterceptor.Level.HEADERS
-            else okhttp3.logging.HttpLoggingInterceptor.Level.NONE
-        chain.proceed(chain.request())
-    }
-
+    // Login clients deliberately have no HTTP logger: headers and responses contain credentials.
     // user-center client: DEFAULT_HEADERS + X-HMAC-* (key = hmac_access/secret)
     private val ucClient = OkHttpClient.Builder()
         .addInterceptor(UcInterceptor())
-        .addInterceptor(httpLogGate)
-        .addInterceptor(httpLog)
         .build()
     // TSP client: LOGGED_IN_HEADERS + X-SIGNATURE (key = prod_secret) — reuses the app transport
     private val tspClient = OkHttpClient.Builder()
         .addInterceptor(HeaderInterceptor(store))
         .addInterceptor(SignInterceptor(store))
-        .addInterceptor(httpLogGate)
-        .addInterceptor(httpLog)
         .build()
     // xchanger (ECARX DK backend) client — plain; the authCode in the body is the auth.
     private val xchangerClient = OkHttpClient.Builder()
-        .addInterceptor(httpLogGate)
-        .addInterceptor(httpLog)
         .build()
 
     private inner class UcInterceptor : Interceptor {
@@ -79,7 +64,7 @@ class AccountLogin(private val store: ConfigStore) {
             val cfg = store.current()
             val req = chain.request()
             val b = req.newBuilder()
-            ZeekrConst.defaultHeaders(cfg.countryCode).forEach { (k, v) -> if (req.header(k) == null) b.header(k, v) }
+            userCenterHeaders(cfg.countryCode, req.url.encodedPath).forEach { (k, v) -> if (req.header(k) == null) b.header(k, v) }
             if (ucToken.isNotBlank()) b.header("authorization", ucToken)
             val bodyBytes = req.body?.let { okio.Buffer().use { buf -> it.writeTo(buf); buf.readByteArray() } }
             val h = Signing.usercenterHmac(req.method, req.url.toString(), cfg.hmacAccessKey, cfg.hmacSecretKey, bodyBytes)
@@ -96,10 +81,6 @@ class AccountLogin(private val store: ConfigStore) {
         runCatching {
             val cfg = store.current()
             Logx.d("login", "=== login start ===")
-            Logx.d("login", "email=${cfg.email.ifBlank { "(blank)" }} deviceId=${cfg.deviceIdentifier}")
-            Logx.d("login", "hmacAccessKey=${Logx.preview(cfg.hmacAccessKey)} hmacSecretKey=${Logx.preview(cfg.hmacSecretKey)}")
-            Logx.d("login", "passwordPublicKey=${Logx.preview(cfg.passwordPublicKey)} prodSecret=${Logx.preview(cfg.prodSecret)}")
-            Logx.d("login", "region=${cfg.regionCode} usercenter=${cfg.usercenterUrl} tsp=${cfg.baseUrl}")
 
             require(cfg.email.isNotBlank() && cfg.password.isNotBlank()) { "email/password not set (enter them in Settings → Account)" }
             require(cfg.hmacAccessKey.isNotBlank() && cfg.hmacSecretKey.isNotBlank()) { "hmac keys not set" }
@@ -129,7 +110,6 @@ class AccountLogin(private val store: ConfigStore) {
             // Persist it: this server-issued token IS the Authorization for every azure/overseas
             // call (inbox/notifications). Not the TSP bearer, not client-minted. (Confirmed 2026-09-16.)
             store.update { it.copy(azureToken = tokenValue) }
-            Logx.d("login", "step 2/6 login OK, ucToken=${Logx.preview(tokenValue)}")
 
             // 3. user info -> numeric userId
             Logx.d("login", "step 3/6 user/info …")
@@ -137,14 +117,12 @@ class AccountLogin(private val store: ConfigStore) {
             val userId = info?.get("userId")?.jsonPrimitive?.contentOrNull
                 ?: info?.get("id")?.jsonPrimitive?.contentOrNull
             val accountUuid = info?.get("uuid")?.jsonPrimitive?.contentOrNull
-            Logx.d("login", "step 3/6 user/info OK, userId=${userId ?: "(none)"} uuid=${accountUuid ?: "(none)"}")
 
             // 4. tsp code
             Logx.d("login", "step 4/6 tspCode …")
             val tspCodeData = ucGet("$uc${ZeekrConst.TSPCODE_URL}?tspClientId=${ZeekrConst.CLIENT_ID}")
             val tspCode = tspCodeData?.get("code")?.jsonPrimitive?.contentOrNull
                 ?: error("no tsp code")
-            Logx.d("login", "step 4/6 tspCode OK=${Logx.preview(tspCode)}")
 
             // 4b. xchanger (ECARX) DK-backend session. The stock app authenticates here after
             //     login; this is the registration path that makes the VEHICLE accept our device
@@ -159,7 +137,6 @@ class AccountLogin(private val store: ConfigStore) {
                     .header("client-id", ZeekrConst.XCHANGER_CLIENT_ID)
                     .get().build())
                 val xAuthCode = xCodeData?.get("code")?.jsonPrimitive?.contentOrNull ?: error("no xchanger authCode")
-                Logx.d("login", "step 4b xchanger authCode=${Logx.preview(xAuthCode)}")
                 // Full HF headers: device-identity (HFOkHttpClientUtil$RequestInterceptor) PLUS the
                 // X-SIGNATURE/X-TIMESTAMP the SignInterceptor adds (see hfSign). X-DEVICE-IDENTIFIER
                 // is normally native getMobileId — we supply our own stable value.
@@ -187,7 +164,6 @@ class AccountLogin(private val store: ConfigStore) {
                     timestamp = ts,
                     accept = ZeekrConst.XCHANGER_ACCEPT,
                 )
-                Logx.d("login", "step 4b xchanger session (X-DEVICE-IDENTIFIER=$devId) X-SIGNATURE=${Logx.preview(sig)} ts=$ts key=${Logx.preview(hfKey)} …")
                 // xchanger uses its own envelope {code:1000, data:{…}} (not the 000000/success one),
                 // so read the raw root and accept 1000 as success.
                 // Header set mirrors stock's HFOkHttpClientUtil$RequestInterceptor for ZEEKR.
@@ -228,8 +204,7 @@ class AccountLogin(private val store: ConfigStore) {
                 val xClientId = xData["clientId"]?.jsonPrimitive?.contentOrNull
                 val xToken = xData["accessToken"]?.jsonPrimitive?.contentOrNull
                 store.update { it.copy(xchangerClientId = xClientId ?: "", xchangerToken = xToken ?: "") }
-                Logx.d("login", "step 4b xchanger session OK clientId=$xClientId token=${Logx.preview(xToken ?: "")}")
-            }.onFailure { Logx.w("login", "step 4b xchanger session FAILED: ${it.message}") }
+            }.onFailure { Logx.w("login", "step 4b xchanger session FAILED: details omitted") }
 
             // 4c. Register THIS device as the account's active push endpoint (zom-message-core).
             //     Stock does this on login; it is what claims the single-device session — logging
@@ -253,9 +228,8 @@ class AccountLogin(private val store: ConfigStore) {
                     .header("Brand", "ZEEKR")
                     .post(eqBody.toString().toRequestBody(jsonMedia))
                     .build())
-                Logx.d("login", "step 4c equipment register code=${eqRoot?.get("code")?.jsonPrimitive?.contentOrNull} " +
-                    "endpoint=${(eqRoot?.get("data") as? JsonObject)?.get("endpoint")?.jsonPrimitive?.contentOrNull ?: "-"}")
-            }.onFailure { Logx.w("login", "step 4c equipment register FAILED: ${it.message}") }
+                Logx.d("login", "step 4c equipment register completed")
+            }.onFailure { Logx.w("login", "step 4c equipment register FAILED: details omitted") }
 
             // 5. bearer login (TSP) -> accessToken
             Logx.d("login", "step 5/6 bearer_login (TSP) …")
@@ -273,16 +247,13 @@ class AccountLogin(private val store: ConfigStore) {
                 put("loginPhoneModel", ZeekrConst.XCHANGER_DEVICE_MODEL)
                 put("loginSystem", "Android")
             })
-            Logx.d("login", "step 5/6 bearer_login loginDeviceId=$loginDeviceId")
             val bearer = bearerData?.get("accessToken")?.jsonPrimitive?.contentOrNull
                 ?: error("no bearer token")
-            Logx.d("login", "step 5/6 bearer OK=${Logx.preview(bearer)}")
 
             // The numeric userId (needed for DK signing = userId+deviceId+vin) is NOT
             // in user/info (that returns only the uuid) — it's a claim in the TSP
             // bearer JWT. Extract it from there.
             val jwtUserId = jwtClaim(bearer, "userId")
-            Logx.d("login", "userId from JWT=${jwtUserId ?: "(none)"}")
 
             // persist token+userId (+ account openId for the inbox HS256 token, see
             // InboxAuthToken) BEFORE the vehicle-list call (it needs auth)
@@ -301,20 +272,19 @@ class AccountLogin(private val store: ConfigStore) {
                 val isOwner = first?.get("isOwner")?.jsonPrimitive?.booleanOrNull ?: false
                 if (!vin.isNullOrBlank()) {
                     store.update { it.copy(vin = vin, isOwner = isOwner) }
-                    Logx.d("login", "step 6/6 vehicle-list OK, vin=$vin isOwner=$isOwner")
                 } else {
                     Logx.w("login", "step 6/6 vehicle-list returned no vin (enter it manually if needed)")
                 }
-            }.onFailure { Logx.w("login", "step 6/6 vehicle-list failed: ${it.message}") }
+            }.onFailure { Logx.w("login", "step 6/6 vehicle-list failed: details omitted") }
 
             // 7. app online heartbeat — marks THIS device (app-instance UUID) as the account's
             //    ONLINE device in ms-app-online-manager. Stock heartbeats this continuously; being
             //    the online device is very likely what makes the vehicle route/accept its DK to us.
-            runCatching { heartbeat() }.onFailure { Logx.w("login", "step 7 app/hb failed: ${it.message}") }
+            runCatching { heartbeat() }.onFailure { Logx.w("login", "step 7 app/hb failed: details omitted") }
 
             Logx.d("login", "=== login SUCCESS ===")
             Unit
-        }.onFailure { Logx.e("login", "=== login FAILED ===", it) }
+        }.onFailure { Logx.e("login", "=== login FAILED (see safe status code) ===") }
     }
 
     // ---- helpers ----
@@ -332,7 +302,6 @@ class AccountLogin(private val store: ConfigStore) {
             put("hbType", 3); put("ts", System.currentTimeMillis())
         }
         tspPost("${tsp}ms-app-online-manager/api/v1.0/app/hb", body)
-        Logx.d("login", "app/hb online OK (deviceId=${cfg.appInstanceId})")
     }
 
     /** Extract a string claim from a JWT bearer token ("Bearer <header>.<payload>.<sig>"). */
@@ -343,13 +312,6 @@ class AccountLogin(private val store: ConfigStore) {
         json.parseToJsonElement(decoded).jsonObject[claim]?.jsonPrimitive?.contentOrNull
     }.getOrNull()
 
-    private fun encryptPassword(password: String, pubKeyB64: String): String {
-        if (pubKeyB64.isBlank()) return password
-        val key = KeyFactory.getInstance("RSA")
-            .generatePublic(X509EncodedKeySpec(Base64.decode(pubKeyB64, Base64.DEFAULT)))
-        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply { init(Cipher.ENCRYPT_MODE, key) }
-        return Base64.encodeToString(cipher.doFinal(password.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-    }
 
     /**
      * Replicates `com/baselinelibrary/sign/SignUtil.sign` (the HF/xchanger `SignInterceptor`).
@@ -413,7 +375,7 @@ class AccountLogin(private val store: ConfigStore) {
 
     /** Execute, require success, return the `data` object. */
     private fun exec(client: OkHttpClient, req: Request): JsonObject? {
-        val root = execRoot(client, req) ?: error("empty response: ${req.url}")
+        val root = execRoot(client, req) ?: error("Empty login response")
         requireSuccess(root, req.url.toString())
         return root["data"]?.let { if (it is JsonObject) it else null }
     }
@@ -422,9 +384,10 @@ class AccountLogin(private val store: ConfigStore) {
         val ep = req.url.encodedPath.substringAfterLast('/')
         client.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            Logx.d("http", "<- $ep HTTP ${resp.code} (${text.length}B): ${text.take(600)}")
-            if (text.isBlank()) error("HTTP ${resp.code} empty body: ${req.url}")
-            return json.parseToJsonElement(text).jsonObject
+            Logx.d("login", "<- $ep HTTP ${resp.code}")
+            if (text.isBlank()) error("HTTP ${resp.code} empty response")
+            return try { json.parseToJsonElement(text).jsonObject }
+            catch (_: Exception) { error("Invalid login response format") }
         }
     }
 
@@ -433,8 +396,29 @@ class AccountLogin(private val store: ConfigStore) {
             ?: false
         val code = root["code"]?.jsonPrimitive?.contentOrNull
         if (!success && code != "000000") {
-            val msg = root["msg"]?.jsonPrimitive?.contentOrNull ?: root["message"]?.jsonPrimitive?.contentOrNull
-            error("request failed ($code ${msg ?: ""}) @ ${url.substringAfterLast('/').substringBefore('?')}")
+            val safeCode = code?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
+            Logx.d("login", "Request rejected (code=$safeCode)")
+            error("request failed (code=$safeCode)")
         }
+    }
+    companion object {
+        /** Only the failing password-login request adopts the official overseas 3.0.7 identity. */
+        internal fun userCenterHeaders(countryCode: String, path: String): Map<String, String> {
+            val headers = ZeekrConst.defaultHeaders(countryCode)
+            return if (path.endsWith("/" + ZeekrConst.LOGIN_URL)) headers + mapOf(
+                "appversion" to "3.0.7",
+                "user-agent" to "Device/GoogleAppName/com.zeekr.overseasAppVersion/3.0.7Platform/androidOSVersion/16Ditto/true",
+            ) else headers
+        }
+
+        /** Android 3.0.7 retains Base64 line folding and the trailing LF in the JSON password. */
+        internal fun encryptPassword(password: String, pubKeyB64: String): String {
+            if (pubKeyB64.isBlank()) return password
+            val key = KeyFactory.getInstance("RSA")
+                .generatePublic(X509EncodedKeySpec(Base64.decode(pubKeyB64, Base64.DEFAULT)))
+            val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding").apply { init(Cipher.ENCRYPT_MODE, key) }
+            return Base64.encodeToString(cipher.doFinal(password.toByteArray(Charsets.UTF_8)), Base64.DEFAULT)
+        }
+
     }
 }
