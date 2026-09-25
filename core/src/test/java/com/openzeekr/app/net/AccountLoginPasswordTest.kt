@@ -92,4 +92,30 @@ class AccountLoginPasswordTest {
             assertEquals(original, AccountLogin.userCenterHeaders(country, "/zeekr-cuc-idaas/" + ZeekrConst.CHECKUSER_URL))
         }
     }
+
+    @Test fun loginMessageIsRedactedBeforeTruncationAndIgnoresData() {
+        val root = buildJsonObject {
+            put("msg", "Rejected Person@Example.invalid pw-fixture cipher-fixture hmac-fixture token-fixture vin-fixture header-fixture data-fixture " + "x ".repeat(100))
+            put("data", buildJsonObject { put("value", "data-fixture") })
+        }
+        val safe = AccountLogin.sanitizedLoginMessage(root, listOf("person@example.invalid",
+            "pw-fixture", "cipher-fixture", "hmac-fixture", "token-fixture", "vin-fixture", "header-fixture"))!!
+        assertTrue(safe.length <= 160)
+        assertTrue(safe.startsWith("Rejected [redacted]"))
+        assertFalse(safe.contains("fixture"))
+        assertFalse(safe.contains("@"))
+        val boundary = buildJsonObject { put("msg", "x ".repeat(76) + "person@example.invalid") }
+        assertFalse(AccountLogin.sanitizedLoginMessage(boundary, listOf("person@example.invalid"))!!.contains("person"))
+    }
+
+    @Test fun loginMessageFallsBackWithoutExposingObjectsOrResponseData() {
+        assertEquals("Try again", AccountLogin.sanitizedLoginMessage(
+            buildJsonObject { put("msg", ""); put("message", "Try again") }, emptyList()))
+        assertNull(AccountLogin.sanitizedLoginMessage(
+            buildJsonObject { put("data", "Never display this") }, emptyList()))
+        assertNull(AccountLogin.sanitizedLoginMessage(
+            buildJsonObject { put("msg", buildJsonObject { put("password", "synthetic") }) }, emptyList()))
+        assertEquals("[redacted]", AccountLogin.sanitizedLoginMessage(
+            buildJsonObject { put("message", "headers: Authorization=synthetic") }, emptyList()))
+    }
 }

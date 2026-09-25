@@ -386,22 +386,69 @@ class AccountLogin(private val store: ConfigStore) {
             val text = resp.body?.string().orEmpty()
             Logx.d("login", "<- $ep HTTP ${resp.code}")
             if (text.isBlank()) error("HTTP ${resp.code} empty response")
-            return try { json.parseToJsonElement(text).jsonObject }
+            val root = try { json.parseToJsonElement(text).jsonObject }
             catch (_: Exception) { error("Invalid login response format") }
+            if (req.url.encodedPath.endsWith("/" + ZeekrConst.LOGIN_URL) &&
+                root["success"]?.jsonPrimitive?.contentOrNull != "true" &&
+                root["code"]?.jsonPrimitive?.contentOrNull != "000000") {
+                val cfg = store.current()
+                // Redaction inputs only: never log headers, credentials, or the request body.
+                val body = req.body?.let { okio.Buffer().use { b -> it.writeTo(b); b.readUtf8() } }
+                val bodyValues = body?.let {
+                    runCatching { json.parseToJsonElement(it).jsonObject.values.mapNotNull { v ->
+                        (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull
+                    } }.getOrDefault(emptyList())
+                }.orEmpty()
+                val privateValues = listOf(cfg.email, cfg.password, cfg.vin, cfg.hmacAccessKey,
+                    cfg.hmacSecretKey, cfg.prodSecret, cfg.vinKey, cfg.vinIv, cfg.passwordPublicKey,
+                    cfg.xchangerSignSecret, cfg.overseasAccessKey, cfg.overseasSecretKey,
+                    cfg.inboxAuthSecret, cfg.accessToken, cfg.azureToken, cfg.xchangerToken, ucToken) +
+                    resp.request.headers.map { it.second } + bodyValues
+                requireSuccess(root, req.url.toString(), sanitizedLoginMessage(root, privateValues))
+            }
+            return root
         }
     }
 
-    private fun requireSuccess(root: JsonObject, url: String) {
+    private fun requireSuccess(root: JsonObject, url: String, safeMessage: String? = null) {
         val success = root["success"]?.jsonPrimitive?.let { runCatching { it.contentOrNull == "true" }.getOrDefault(false) }
             ?: false
         val code = root["code"]?.jsonPrimitive?.contentOrNull
         if (!success && code != "000000") {
             val safeCode = code?.takeIf { it.matches(Regex("[0-9]{1,12}")) } ?: "unknown"
             Logx.d("login", "Request rejected (code=$safeCode)")
-            error("request failed (code=$safeCode)")
+            error("request failed (code=$safeCode)" + (safeMessage?.let { ": $it" } ?: ""))
         }
     }
     companion object {
+        /** Only top-level message text is displayed; everything else is a redaction input. */
+        internal fun sanitizedLoginMessage(root: JsonObject, privateValues: List<String>): String? {
+            val message = listOf("msg", "message").firstNotNullOfOrNull { key ->
+                (root[key] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
+            } ?: return null
+            // Suppress structured dumps rather than risk presenting headers or response data.
+            if (message.any { it == '{' || it == '}' } ||
+                Regex("(?i)\\b(?:headers?|data|authorization|password|ciphertext|token|x-hmac-[a-z-]+|x-vin)[\"']?\\s*[:=]").containsMatchIn(message))
+                return "[redacted]"
+            fun leaves(value: JsonElement?): List<String> = when (value) {
+                is JsonObject -> value.values.flatMap { leaves(it) }
+                is kotlinx.serialization.json.JsonArray -> value.flatMap { leaves(it) }
+                is kotlinx.serialization.json.JsonPrimitive -> listOfNotNull(value.contentOrNull)
+                else -> emptyList()
+            }
+            val values = (privateValues + leaves(root["data"])).filter { it.isNotBlank() }
+                .flatMap { listOf(it, kotlinx.serialization.json.JsonPrimitive(it).toString().removeSurrounding("\"")) }
+                .distinct().sortedByDescending { it.length }
+            var safe = message
+            if (values.isNotEmpty()) safe = Regex(values.joinToString("|") { Regex.escape(it) },
+                RegexOption.IGNORE_CASE).replace(safe) { "[redacted]" }
+            safe = Regex("(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}").replace(safe, "[redacted]")
+            safe = Regex("(?i)\\b[A-HJ-NPR-Z0-9]{17}\\b").replace(safe, "[redacted]")
+            safe = Regex("[A-Za-z0-9_+/=-]{24,}").replace(safe, "[redacted]")
+            return safe.replace(Regex("[\\p{Cc}\\p{Cf}]"), " ").trim().take(160).ifBlank { null }
+        }
+
         /** Only the failing password-login request adopts the official overseas 3.0.7 identity. */
         internal fun userCenterHeaders(countryCode: String, path: String): Map<String, String> {
             val headers = ZeekrConst.defaultHeaders(countryCode)
