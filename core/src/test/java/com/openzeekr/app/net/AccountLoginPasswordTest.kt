@@ -54,17 +54,42 @@ class AccountLoginPasswordTest {
         assertTrue("JSON round trip must not trim or normalize ciphertext", decoded == encoded)
     }
 
-    @Test fun identityOverrideIsLimitedToPasswordLogin() {
+    @Test fun passwordLoginUsesCompleteOverseas307Identity() {
+        val expected = mapOf(
+            "app-authorization" to "1009",
+            "app-code" to "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
+            "appcode" to "eu-app",
+            "appid" to "TSP",
+            "appsecret" to "zeekr_tis",
+            "appversion" to "3.0.7",
+            "client-id" to "1d1921ad4d314ab7b0042a2fe0f479c3",
+            "msgappid" to "10008",
+            "msgclientid" to "1009",
+            "tmp-tenant-code" to "3300671070785540000",
+            "Brand" to "ZEEKR",
+            "user-agent" to "Device/GoogleAppName/com.zeekr.overseasAppVersion/3.0.7Platform/androidOSVersion/16Ditto/true",
+        )
         val original = ZeekrConst.defaultHeaders("NO")
         val login = AccountLogin.userCenterHeaders("NO", "/zeekr-cuc-idaas/" + ZeekrConst.LOGIN_URL)
-        assertEquals("3.0.7", login["appversion"])
-        assertTrue(login.getValue("user-agent").contains("com.zeekr.overseasAppVersion/3.0.7"))
-        assertTrue("Only presentation identity headers may change",
-            login.filterKeys { it !in setOf("appversion", "user-agent") } ==
-                original.filterKeys { it !in setOf("appversion", "user-agent") })
-        for (path in listOf(ZeekrConst.CHECKUSER_URL, ZeekrConst.TSPCODE_URL, ZeekrConst.USERINFO_URL)) {
-            assertTrue("Other user-center requests must retain their headers",
-                AccountLogin.userCenterHeaders("NO", "/zeekr-cuc-idaas/$path") == original)
+        assertEquals("Complete observed identity, with all other headers preserved", original + expected, login)
+    }
+
+    @Test fun otherEndpointsRetainExactlyTheirOriginalHeaders() {
+        val paths = listOf(
+            ZeekrConst.CHECKUSER_URL, ZeekrConst.TSPCODE_URL, ZeekrConst.USERINFO_URL,
+            ZeekrConst.BEARERLOGIN_URL, ZeekrConst.VEHLIST_URL,
+            "auth/loginByEmailEncryptExtra", "auth/loginByEmailEncrypt/child",
+        )
+        for (country in listOf("NO", "SE")) {
+            val original = ZeekrConst.defaultHeaders(country)
+            for (path in paths) {
+                assertEquals("No identity override for $path",
+                    original, AccountLogin.userCenterHeaders(country, "/zeekr-cuc-idaas/$path"))
+            }
+            // A login call must not mutate the shared defaults or affect the next canary.
+            AccountLogin.userCenterHeaders(country, "/zeekr-cuc-idaas/" + ZeekrConst.LOGIN_URL)
+            assertEquals(original, ZeekrConst.defaultHeaders(country))
+            assertEquals(original, AccountLogin.userCenterHeaders(country, "/zeekr-cuc-idaas/" + ZeekrConst.CHECKUSER_URL))
         }
     }
 }

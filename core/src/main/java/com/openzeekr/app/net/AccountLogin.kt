@@ -406,7 +406,17 @@ class AccountLogin(private val store: ConfigStore) {
         internal fun userCenterHeaders(countryCode: String, path: String): Map<String, String> {
             val headers = ZeekrConst.defaultHeaders(countryCode)
             return if (path.endsWith("/" + ZeekrConst.LOGIN_URL)) headers + mapOf(
+                "app-authorization" to "1009",
+                "app-code" to "1JwLroFkFFIpgFGdTRrm4_nzkkwDkfHj7RxJQb7J8tc",
+                "appcode" to "eu-app",
+                "appid" to "TSP",
+                "appsecret" to "zeekr_tis",
                 "appversion" to "3.0.7",
+                "client-id" to "1d1921ad4d314ab7b0042a2fe0f479c3",
+                "msgappid" to "10008",
+                "msgclientid" to "1009",
+                "tmp-tenant-code" to "3300671070785540000",
+                "Brand" to "ZEEKR",
                 "user-agent" to "Device/GoogleAppName/com.zeekr.overseasAppVersion/3.0.7Platform/androidOSVersion/16Ditto/true",
             ) else headers
         }
